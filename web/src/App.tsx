@@ -36,19 +36,213 @@ const ACTIVITIES: Activity[] = [
 ];
 
 const PRESETS = [5, 10, 15, 20, 25, 30, 45, 60];
-
-const TRACKS = [
-  { label: "🌧️ Rain",   src: "https://assets.mixkit.co/music/preview/mixkit-rain-and-thunder-ambience-1246.mp3" },
-  { label: "🌲 Forest", src: "https://assets.mixkit.co/music/preview/mixkit-forest-birds-ambience-1210.mp3" },
-  { label: "🌊 Ocean",  src: "https://assets.mixkit.co/music/preview/mixkit-ocean-waves-loop-1196.mp3" },
-  { label: "🎵 Lofi",   src: "https://assets.mixkit.co/music/preview/mixkit-serene-view-443.mp3" },
-];
-
 const STORAGE_SESSIONS = "focus_sessions_v2";
 
 function pad(n: number) { return String(n).padStart(2, "0"); }
 function formatTime(s: number) { return `${pad(Math.floor(s / 60))}:${pad(s % 60)}`; }
 function genId() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+
+// ── Web Audio Sound Engine ────────────────────────────────────────────────
+//
+// All sounds are generated procedurally via the Web Audio API.
+// No external URLs — works offline, no CORS issues.
+
+type SoundType = "rain" | "forest" | "ocean" | "whitenoise";
+
+const TRACKS: { label: string; type: SoundType }[] = [
+  { label: "🌧️ Rain",       type: "rain" },
+  { label: "🌲 Forest",     type: "forest" },
+  { label: "🌊 Ocean",      type: "ocean" },
+  { label: "🤍 White Noise", type: "whitenoise" },
+];
+
+class SoundEngine {
+  private ctx: AudioContext | null = null;
+  private nodes: AudioNode[] = [];
+  private gainNode: GainNode | null = null;
+  private _volume = 0.4;
+  private _type: SoundType = "rain";
+  private _playing = false;
+
+  private getCtx(): AudioContext {
+    if (!this.ctx || this.ctx.state === "closed") {
+      this.ctx = new AudioContext();
+    }
+    return this.ctx;
+  }
+
+  private buildRain(ctx: AudioContext, master: GainNode) {
+    // Pink-ish noise via multiple filtered white noise sources
+    const bufferSize = ctx.sampleRate * 4;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0;
+    for (let i = 0; i < bufferSize; i++) {
+      const white = Math.random() * 2 - 1;
+      b0 = 0.99886 * b0 + white * 0.0555179;
+      b1 = 0.99332 * b1 + white * 0.0750759;
+      b2 = 0.96900 * b2 + white * 0.1538520;
+      b3 = 0.86650 * b3 + white * 0.3104856;
+      b4 = 0.55000 * b4 + white * 0.5329522;
+      b5 = -0.7616 * b5 - white * 0.0168980;
+      data[i] = (b0 + b1 + b2 + b3 + b4 + b5 + white * 0.5362) * 0.11;
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+
+    // High-pass to make it sound more like rain
+    const hp = ctx.createBiquadFilter();
+    hp.type = "highpass";
+    hp.frequency.value = 1000;
+
+    source.connect(hp);
+    hp.connect(master);
+    source.start();
+    this.nodes.push(source, hp);
+  }
+
+  private buildForest(ctx: AudioContext, master: GainNode) {
+    // Low rumble + occasional chirp-like tones
+    const bufferSize = ctx.sampleRate * 4;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * 0.15;
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 600;
+
+    source.connect(lp);
+    lp.connect(master);
+    source.start();
+    this.nodes.push(source, lp);
+
+    // Add gentle oscillating tones (birds)
+    const birdFreqs = [1200, 1600, 2000, 2400];
+    birdFreqs.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const oscGain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = freq;
+      oscGain.gain.value = 0;
+
+      // Automate gain to simulate intermittent chirps
+      const period = 3 + i * 1.5;
+      const now = ctx.currentTime;
+      for (let t = 0; t < 300; t += period) {
+        const start = now + t + Math.random() * period;
+        oscGain.gain.setValueAtTime(0, start);
+        oscGain.gain.linearRampToValueAtTime(0.015, start + 0.05);
+        oscGain.gain.linearRampToValueAtTime(0, start + 0.2);
+      }
+
+      osc.connect(oscGain);
+      oscGain.connect(master);
+      osc.start();
+      this.nodes.push(osc, oscGain);
+    });
+  }
+
+  private buildOcean(ctx: AudioContext, master: GainNode) {
+    // Low-frequency filtered noise with slow LFO for wave rhythm
+    const bufferSize = ctx.sampleRate * 8;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+
+    const lp = ctx.createBiquadFilter();
+    lp.type = "lowpass";
+    lp.frequency.value = 400;
+
+    // LFO to simulate wave rhythm
+    const lfo = ctx.createOscillator();
+    const lfoGain = ctx.createGain();
+    lfo.frequency.value = 0.12; // ~one wave every 8 seconds
+    lfoGain.gain.value = 0.25;
+    lfo.connect(lfoGain);
+
+    const waveGain = ctx.createGain();
+    waveGain.gain.value = 0.35;
+    lfoGain.connect(waveGain.gain);
+
+    source.connect(lp);
+    lp.connect(waveGain);
+    waveGain.connect(master);
+    lfo.start();
+    source.start();
+    this.nodes.push(source, lp, lfo, lfoGain, waveGain);
+  }
+
+  private buildWhiteNoise(ctx: AudioContext, master: GainNode) {
+    const bufferSize = ctx.sampleRate * 2;
+    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * 0.3;
+    }
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.loop = true;
+    source.connect(master);
+    source.start();
+    this.nodes.push(source);
+  }
+
+  play(type: SoundType, volume: number) {
+    this._type = type;
+    this._volume = volume;
+    this._playing = true;
+    this.stop();
+
+    const ctx = this.getCtx();
+    if (ctx.state === "suspended") ctx.resume();
+
+    const master = ctx.createGain();
+    master.gain.value = volume;
+    master.connect(ctx.destination);
+    this.gainNode = master;
+    this.nodes.push(master);
+
+    switch (type) {
+      case "rain":       this.buildRain(ctx, master); break;
+      case "forest":     this.buildForest(ctx, master); break;
+      case "ocean":      this.buildOcean(ctx, master); break;
+      case "whitenoise": this.buildWhiteNoise(ctx, master); break;
+    }
+  }
+
+  stop() {
+    this.nodes.forEach((n) => {
+      try { (n as AudioScheduledSourceNode).stop?.(); } catch {}
+      try { n.disconnect(); } catch {}
+    });
+    this.nodes = [];
+    this.gainNode = null;
+    this._playing = false;
+  }
+
+  setVolume(v: number) {
+    this._volume = v;
+    if (this.gainNode) this.gainNode.gain.value = v;
+  }
+
+  isPlaying() { return this._playing; }
+  currentType() { return this._type; }
+}
+
+// Singleton engine
+const engine = new SoundEngine();
 
 // ── App ────────────────────────────────────────────────────────────────────
 
@@ -68,29 +262,23 @@ export default function App() {
   });
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const audioRef    = useRef<HTMLAudioElement | null>(null);
 
-  // ── Audio ─────────────────────────────────────────────────────────────
-
-  useEffect(() => {
-    const audio = new Audio(TRACKS[trackIdx].src);
-    audio.loop   = true;
-    audio.volume = volume;
-    audioRef.current = audio;
-    if (timerState === "running" && musicOn) audio.play().catch(() => {});
-    return () => { audio.pause(); audio.src = ""; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trackIdx]);
+  // ── Sound control ─────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (audioRef.current) audioRef.current.volume = volume;
+    if (timerState === "running" && musicOn) {
+      engine.play(TRACKS[trackIdx].type, volume);
+    } else {
+      engine.stop();
+    }
+  }, [timerState, musicOn, trackIdx]);
+
+  useEffect(() => {
+    engine.setVolume(volume);
   }, [volume]);
 
-  useEffect(() => {
-    if (!audioRef.current) return;
-    if (timerState === "running" && musicOn) audioRef.current.play().catch(() => {});
-    else audioRef.current.pause();
-  }, [timerState, musicOn]);
+  // Stop on unmount
+  useEffect(() => () => engine.stop(), []);
 
   // ── Timer ─────────────────────────────────────────────────────────────
 
@@ -163,11 +351,11 @@ export default function App() {
 
   // ── Derived ───────────────────────────────────────────────────────────
 
-  const total        = minutes * 60;
-  const progress     = timerState === "idle" ? 0 : 1 - remaining / total;
+  const total         = minutes * 60;
+  const progress      = timerState === "idle" ? 0 : 1 - remaining / total;
   const circumference = 2 * Math.PI * 108;
-  const accentColor  = activity?.color ?? "var(--accent)";
-  const totalMinutes = sessions.reduce((a, s) => a + s.minutes, 0);
+  const accentColor   = activity?.color ?? "var(--accent)";
+  const totalMinutes  = sessions.reduce((a, s) => a + s.minutes, 0);
 
   // ── Nav ───────────────────────────────────────────────────────────────
 
@@ -309,7 +497,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Buttons */}
+            {/* Controls */}
             <div className="flex items-center gap-4">
               {timerState !== "idle" && (
                 <button onClick={handleReset}
@@ -390,7 +578,7 @@ export default function App() {
             </div>
           </section>
 
-          {/* Music panel */}
+          {/* Sound panel */}
           <section className="p-4" style={{ background: "var(--panel)", border: "1.5px solid var(--line)", borderRadius: "1.25rem" }}>
             <div className="flex items-center justify-between mb-3">
               <p className="text-xs font-bold uppercase tracking-widest" style={{ color: "var(--muted)" }}>
@@ -406,7 +594,7 @@ export default function App() {
             </div>
             <div className="flex gap-2 flex-wrap mb-4">
               {TRACKS.map((t, i) => (
-                <button key={t.label} onClick={() => { audioRef.current?.pause(); setTrackIdx(i); }}
+                <button key={t.label} onClick={() => setTrackIdx(i)}
                   className="px-3 py-1.5 text-xs font-semibold transition-all"
                   style={{
                     borderRadius: "0.75rem",
@@ -471,8 +659,7 @@ export default function App() {
                 return (
                   <li key={s.id} className="flex items-center gap-4 px-5 py-4"
                     style={{ background: "var(--panel)", border: "1.5px solid var(--line)", borderRadius: "1.25rem" }}>
-                    <span
-                      className="w-11 h-11 flex items-center justify-center text-2xl flex-shrink-0"
+                    <span className="w-11 h-11 flex items-center justify-center text-2xl flex-shrink-0"
                       style={{ borderRadius: "0.75rem", background: color + "1a" }}>
                       {s.activityEmoji}
                     </span>
