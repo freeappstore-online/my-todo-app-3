@@ -1,0 +1,6 @@
+{
+  "appId": "my-todo-app-3",
+  "applicationRoot": "web",
+  "outputPath": "web/dist",
+  "buildCommand": "pnpm build"
+}
